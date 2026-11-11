@@ -16,6 +16,7 @@ import datetime as dt
 import html
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -29,6 +30,7 @@ TOTAL_STOCKS = 100
 THRESHOLDS = [3.0, 5.0]          # % daily move levels that trigger an alert
 UNIVERSE_REFRESH_DAYS = 7        # rebuild the top-100 list once a week
 MAX_SEEN_NEWS = 5000             # how many news ids to remember
+MAX_SUMMARY_CHARS = 600          # max length of each news summary
 STATE_FILE = "state.json"
 NY = ZoneInfo("America/New_York")
 
@@ -230,13 +232,21 @@ def parse_news_item(item):
             or c.get("link"))
     nid = item.get("id") or c.get("id") or c.get("uuid") or link
     publisher = (c.get("provider") or {}).get("displayName") or c.get("publisher") or ""
-    return nid, title, link, publisher
+    summary = c.get("summary") or c.get("description") or ""
+    summary = re.sub(r"<[^>]+>", " ", summary)          # strip any HTML tags
+    summary = re.sub(r"\s+", " ", html.unescape(summary)).strip()
+    if summary == (title or "").strip():
+        summary = ""
+    if len(summary) > MAX_SUMMARY_CHARS:
+        cut = summary[:MAX_SUMMARY_CHARS]
+        summary = cut[:cut.rfind(" ")] + "…" if " " in cut else cut + "…"
+    return nid, title, link, publisher, summary
 
 
 def check_news(state, universe):
     seen_list = state.get("seen_news", [])
     seen = set(seen_list)
-    new_items = {}  # id -> [title, link, publisher, [tickers]]
+    new_items = {}  # id -> [title, link, publisher, summary, [tickers]]
 
     for t in universe:
         try:
@@ -245,14 +255,14 @@ def check_news(state, universe):
             print("news failed", t, e)
             continue
         for it in items:
-            nid, title, link, pub = parse_news_item(it)
+            nid, title, link, pub, summary = parse_news_item(it)
             if not nid or not title or nid in seen:
                 continue
             if nid in new_items:
-                if t not in new_items[nid][3]:
-                    new_items[nid][3].append(t)
+                if t not in new_items[nid][4]:
+                    new_items[nid][4].append(t)
             else:
-                new_items[nid] = [title, link, pub, [t]]
+                new_items[nid] = [title, link, pub, summary, [t]]
 
     state["seen_news"] = (seen_list + list(new_items))[-MAX_SEEN_NEWS:]
 
@@ -263,15 +273,16 @@ def check_news(state, universe):
         return
 
     lines = []
-    for title, link, pub, tks in new_items.values():
-        safe_title = html.escape(title)
-        source = f" ({html.escape(pub)})" if pub else ""
+    for title, link, pub, summary, tks in new_items.values():
+        source = f" <i>({html.escape(pub)})</i>" if pub else ""
+        block = f"🔹 <b>{', '.join(tks)}</b> | <b>{html.escape(title)}</b>{source}"
+        if summary:
+            block += f"\n{html.escape(summary)}"
         if link:
-            lines.append(f"• <b>{', '.join(tks)}</b> — <a href=\"{html.escape(link)}\">{safe_title}</a>{source}")
-        else:
-            lines.append(f"• <b>{', '.join(tks)}</b> — {safe_title}{source}")
+            block += f"\n<a href=\"{html.escape(link)}\">לכתבה המלאה ←</a>"
+        lines.append(block + "\n")
     if lines:
-        send_lines("📰 <b>חדשות</b>", lines)
+        send_lines("📰 <b>חדשות</b>\n", lines)
 
 
 # ---------------- main ----------------
